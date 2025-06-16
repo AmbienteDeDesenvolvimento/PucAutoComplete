@@ -1,0 +1,8 @@
+{
+  "name": "puc-autocomplete",
+  "version": "1.0.0",
+  "description": "Extensão para automatizar tarefas no Canvas da PUC",
+  "main": "background.js",
+  "dependencies": {
+  }
+} 

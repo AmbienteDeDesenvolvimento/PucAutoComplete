@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "PUC Auto Complete",
+  "version": "1.0",
+  "description": "Extensão para automatizar tarefas no Canvas da PUC Minas",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs",
+    "downloads"
+  ],
+  "host_permissions": [
+    "https://pucminas.instructure.com/*",
+    "https://pucminas.instructuremedia.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://pucminas.instructure.com/*"],
+      "js": ["content.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+} 
