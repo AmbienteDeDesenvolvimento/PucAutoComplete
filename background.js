@@ -36,17 +36,65 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Indica que a resposta será enviada de forma assíncrona
 });
 
+// Função para limpar caracteres especiais do nome do arquivo
+function limparNomeArquivo(filename) {
+    if (!filename || typeof filename !== 'string') {
+        return 'video.mp4';
+    }
+    
+    // Lista de nomes reservados no Windows
+    const nomesReservados = ['CON', 'PRN', 'AUX', 'NUL', 'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9', 'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9'];
+    
+    let cleanName = filename
+        // Remove ou substitui caracteres proibidos em nomes de arquivos
+        .replace(/[<>:"|?*\\/]/g, '_')  // Caracteres proibidos: < > : " | ? * \ /
+        .replace(/[\x00-\x1f\x7f-\x9f]/g, '')  // Remove caracteres de controle
+        .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')  // Remove caracteres Unicode de controle
+        .replace(/^\s+|\s+$/g, '')  // Remove espaços no início e fim
+        .replace(/\s+/g, ' ')  // Substitui múltiplos espaços por um só
+        .replace(/^\.+|\.+$/g, '')  // Remove pontos no início e fim
+        .replace(/\.$/, '')  // Remove ponto final se houver
+        .substring(0, 200);  // Limita o tamanho do nome do arquivo
+    
+    // Verifica se o nome (sem extensão) é um nome reservado
+    const nomeBase = cleanName.replace(/\.[^.]*$/, '').toUpperCase();
+    if (nomesReservados.includes(nomeBase)) {
+        cleanName = 'video_' + cleanName;
+    }
+    
+    // Se o nome ficou vazio ou só com espaços, usa um nome padrão
+    if (!cleanName || cleanName.trim() === '') {
+        cleanName = 'video.mp4';
+    }
+    
+    // Garante que termina com .mp4 se não tiver extensão
+    if (!cleanName.toLowerCase().endsWith('.mp4')) {
+        cleanName += '.mp4';
+    }
+    
+    return cleanName;
+}
+
 // Função para baixar o vídeo
 async function downloadVideo(url, filename) {
     try {
+        console.log('Filename original:', filename);
+        
+        // Limpa o nome do arquivo antes de fazer o download
+        const cleanFilename = limparNomeArquivo(filename);
+        
+        console.log('Filename limpo:', cleanFilename);
+        
         await chrome.downloads.download({
             url: url,
-            filename: filename,
+            filename: cleanFilename,
             saveAs: false
         });
-        console.log('Download iniciado:', filename);
+        console.log('Download iniciado com sucesso:', cleanFilename);
     } catch (error) {
         console.error('Erro ao baixar vídeo:', error);
+        console.error('Filename que causou erro:', filename);
+        console.error('Filename limpo que causou erro:', limparNomeArquivo(filename));
     }
 }
 
@@ -221,12 +269,8 @@ async function processarConteudoPagina(url, titulo) {
         
         console.log('Vídeo encontrado:', videoResult.result.urlVideo);
         
-        // Inicia o download do vídeo
-        await chrome.downloads.download({
-            url: videoResult.result.urlVideo,
-            filename: `${titulo}.mp4`,
-            saveAs: false
-        });
+        // Inicia o download do vídeo usando a função downloadVideo que limpa o filename
+        await downloadVideo(videoResult.result.urlVideo, `${titulo}.mp4`);
         
         return { success: true, urlVideo: videoResult.result.urlVideo };
     } catch (error) {
@@ -342,4 +386,4 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     } else if (request.action === 'abrirConversor') {
         chrome.tabs.create({ url: chrome.runtime.getURL('sandbox.html') });
     }
-}); 
+});
