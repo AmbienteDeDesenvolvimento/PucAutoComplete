@@ -177,6 +177,7 @@ function encontrarVideoMP4() {
 function criarBotaoStatus(elemento) {
     const button = document.createElement('button');
     button.className = 'puc-status-button';
+    button.type = 'button';
     button.innerHTML = '<i class="icon-check"></i>';
     button.title = 'Marcar/Desmarcar como Concluído';
     return button;
@@ -186,6 +187,7 @@ function criarBotaoStatus(elemento) {
 function criarBotaoDownload() {
     const button = document.createElement('button');
     button.className = 'puc-download-button';
+    button.type = 'button';
     button.innerHTML = '<i class="icon-download"></i>';
     button.title = 'Baixar vídeo';
     return button;
@@ -210,57 +212,67 @@ async function processarElemento(elemento) {
     elemento.appendChild(btnDownload);
 
     // Adiciona eventos aos botões
-    btnStatus.addEventListener('click', async () => {
+    btnStatus.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
         try {
-            const statusIcon = elemento.closest('li').querySelector('.module-item-status-icon i');
+            const statusIcon = elemento.closest('li')?.querySelector('.module-item-status-icon i');
             const link = elemento.querySelector('a');
             if (!link) return;
-
-            // Envia mensagem para o background marcar como feito
-            chrome.runtime.sendMessage({
+    
+            // Envia mensagem para o background marcar como feito (promise-based)
+            const response = await chrome.runtime.sendMessage({
                 action: 'marcarComoFeito',
                 url: link.href
-            }, (response) => {
-                // Após marcar como feito, recarrega a página para atualizar o status
-                window.location.reload();
             });
+    
+            if (!response?.success) {
+                throw new Error(response?.error || 'Falha ao marcar/desmarcar como concluído');
+            }
+            // Após marcar como feito, recarrega a página para atualizar o status
+            window.location.reload();
         } catch (error) {
             console.error('Erro ao marcar/desmarcar como concluído:', error);
+            alert('Erro ao marcar/desmarcar como concluído: ' + (error?.message || String(error)));
         }
-    });
+    }, { capture: true });
 
-    btnDownload.addEventListener('click', async () => {
+    btnDownload.addEventListener('click', async (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        e.stopImmediatePropagation();
         try {
             btnDownload.disabled = true;
             const icon = btnDownload.querySelector('i');
             icon.className = 'icon-spinner icon-spin';
-
+    
             // Obtém a URL do link
             const link = elemento.querySelector('a');
             if (!link) {
                 throw new Error('Link não encontrado');
             }
-
+    
             // Envia mensagem para o background script processar o conteúdo
             const response = await chrome.runtime.sendMessage({
                 action: 'processarConteudo',
                 url: link.href,
                 titulo: link.textContent.trim()
             });
-
-            if (!response.success) {
-                throw new Error(response.error || 'Erro ao processar vídeo');
+    
+            if (!response?.success) {
+                throw new Error(response?.error || 'Erro ao processar vídeo');
             }
             // Não faz mais nada aqui, o download é feito pelo background.js
         } catch (error) {
             console.error('Erro ao baixar vídeo:', error);
-            alert('Erro ao baixar vídeo: ' + error.message);
+            alert('Erro ao baixar vídeo: ' + (error?.message || String(error)));
         } finally {
             btnDownload.disabled = false;
             const icon = btnDownload.querySelector('i');
             icon.className = 'icon-download';
         }
-    });
+    }, { capture: true });
 }
 
 // Função para processar todos os elementos
@@ -333,4 +345,4 @@ async function inicializarScript() {
 }
 
 // Executa o script
-inicializarScript(); 
+inicializarScript();

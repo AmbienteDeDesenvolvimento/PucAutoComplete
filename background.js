@@ -3,6 +3,9 @@ chrome.runtime.onInstalled.addListener(() => {
     console.log('Extensão PUC Auto Complete instalada');
 });
 
+// Mapa para forçar nomes no onDeterminingFilename (Plano B)
+const downloadNamesById = new Map();
+
 // Listener para mensagens do content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     console.log('Mensagem recebida no background:', message);
@@ -11,8 +14,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         processarConteudoPagina(message.url, message.titulo)
             .then(result => {
                 if (result.success) {
-                    downloadVideo(result.urlVideo, `${message.titulo}.mp4`);
-                    sendResponse({ success: true });
+                    downloadVideo(result.urlVideo, `${message.titulo}.mp4`)
+                        .then((downloadId) => {
+                            sendResponse({ success: true, downloadId });
+                        })
+                        .catch(error => {
+                            console.error('Erro ao iniciar download:', error);
+                            sendResponse({ success: false, error: error.message });
+                        });
                 } else {
                     console.error('Erro ao processar conteúdo:', result.error);
                     sendResponse({ success: false, error: result.error });
@@ -22,6 +31,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 console.error('Erro ao processar conteúdo:', error);
                 sendResponse({ success: false, error: error.message });
             });
+        return true; // handled async
     } else if (message.action === 'marcarComoFeito') {
         marcarComoFeito(message.url)
             .then(result => {
@@ -31,9 +41,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 console.error('Erro ao marcar como feito:', error);
                 sendResponse({ success: false, error: error.message });
             });
+        return true; // handled async
     }
     
-    return true; // Indica que a resposta será enviada de forma assíncrona
+    // Não tratamos outras ações aqui; permitir que outros listeners respondam
+    return false;
 });
 
 // Função para limpar caracteres especiais do nome do arquivo
@@ -75,26 +87,50 @@ function limparNomeArquivo(filename) {
     return cleanName;
 }
 
-// Função para baixar o vídeo
+// Listener para forçar o nome correto do arquivo durante o download (Plano B)
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+    console.log('onDeterminingFilename - Filename original:', downloadItem.filename);
+
+    // 1) Se há um nome desejado mapeado para este ID, força-o
+    const mapped = downloadNamesById.get(downloadItem.id);
+    if (mapped) {
+        console.log('onDeterminingFilename - Aplicando nome mapeado:', mapped);
+        suggest({ filename: mapped, conflictAction: 'overwrite' });
+        downloadNamesById.delete(downloadItem.id);
+        return;
+    }
+    
+    // 2) Fallback: se for .mp4, aplica limpeza básica
+    if (downloadItem.filename && downloadItem.filename.endsWith('.mp4')) {
+        const cleanFilename = limparNomeArquivo(downloadItem.filename);
+        console.log('onDeterminingFilename - Filename limpo:', cleanFilename);
+        suggest({ filename: cleanFilename, conflictAction: 'uniquify' });
+    } else {
+        suggest();
+    }
+});
+
+// Função para baixar o vídeo usando a API de downloads (Plano B)
 async function downloadVideo(url, filename) {
     try {
-        console.log('Filename original:', filename);
-        
-        // Limpa o nome do arquivo antes de fazer o download
+        console.log('[BG] downloadVideo - Filename original:', filename);
         const cleanFilename = limparNomeArquivo(filename);
+        console.log('[BG] downloadVideo - Filename limpo:', cleanFilename);
         
-        console.log('Filename limpo:', cleanFilename);
-        
-        await chrome.downloads.download({
+        const downloadId = await chrome.downloads.download({
             url: url,
             filename: cleanFilename,
             saveAs: false
         });
-        console.log('Download iniciado com sucesso:', cleanFilename);
+        // mapeia o nome desejado para este download, caso o servidor tente sobrescrever
+        downloadNamesById.set(downloadId, cleanFilename);
+        console.log('[BG] Download iniciado (API downloads):', cleanFilename, 'ID:', downloadId);
+        return downloadId;
     } catch (error) {
-        console.error('Erro ao baixar vídeo:', error);
-        console.error('Filename que causou erro:', filename);
-        console.error('Filename limpo que causou erro:', limparNomeArquivo(filename));
+        console.error('[BG] Erro ao baixar vídeo:', error);
+        console.error('[BG] Filename que causou erro:', filename);
+        console.error('[BG] Filename limpo que causou erro:', limparNomeArquivo(filename));
+        throw error;
     }
 }
 
@@ -106,23 +142,18 @@ function encontrarUrlIframe() {
         
         const verificarIframe = () => {
             console.log('Tentativa', tentativas + 1, 'de encontrar iframe...');
-            
-            // Procura por iframes que contenham a URL do Canvas
             const iframes = document.querySelectorAll('iframe[src*="pucminas.instructure.com/courses/"]');
             console.log('Iframes encontrados:', iframes.length);
-            
             if (iframes.length > 0) {
                 const iframe = iframes[0];
                 console.log('Iframe encontrado:', iframe);
                 const src = iframe.getAttribute('src');
-                
                 if (src) {
                     console.log('URL do iframe encontrada:', src);
                     resolve(src);
                     return;
                 }
             }
-            
             tentativas++;
             if (tentativas < maxTentativas) {
                 setTimeout(verificarIframe, 500);
@@ -131,7 +162,6 @@ function encontrarUrlIframe() {
                 resolve(null);
             }
         };
-        
         verificarIframe();
     });
 }
@@ -145,12 +175,8 @@ function encontrarVideoMP4() {
         
         function tentarEncontrarVideo() {
             console.log(`Tentativa ${tentativas + 1} de ${maxTentativas} para encontrar o vídeo`);
-            
-            // Procura por todos os elementos de vídeo
             const videos = document.querySelectorAll('video');
             console.log(`Encontrados ${videos.length} elementos de vídeo`);
-            
-            // Itera sobre cada vídeo encontrado
             for (let i = 0; i < videos.length; i++) {
                 const video = videos[i];
                 console.log(`Verificando vídeo ${i + 1}:`, {
@@ -158,12 +184,8 @@ function encontrarVideoMP4() {
                     class: video.className,
                     attributes: Array.from(video.attributes).map(attr => `${attr.name}="${attr.value}"`).join(', ')
                 });
-                
-                // Procura por sources dentro do vídeo
                 const sources = video.querySelectorAll('source');
                 console.log(`Vídeo ${i + 1} tem ${sources.length} sources`);
-                
-                // Itera sobre cada source
                 for (let j = 0; j < sources.length; j++) {
                     const source = sources[j];
                     console.log(`Verificando source ${j + 1} do vídeo ${i + 1}:`, {
@@ -171,16 +193,12 @@ function encontrarVideoMP4() {
                         type: source.type,
                         attributes: Array.from(source.attributes).map(attr => `${attr.name}="${attr.value}"`).join(', ')
                     });
-                    
-                    // Verifica se é um vídeo MP4
                     if (source.src && source.src.includes('.mp4')) {
                         console.log('Vídeo MP4 encontrado:', source.src);
                         return resolve({ success: true, urlVideo: source.src });
                     }
                 }
             }
-            
-            // Se não encontrou o vídeo e ainda não atingiu o máximo de tentativas
             if (tentativas < maxTentativas - 1) {
                 tentativas++;
                 console.log(`Vídeo não encontrado. Tentativa ${tentativas} de ${maxTentativas}. Tentando novamente em ${intervalo}ms...`);
@@ -190,8 +208,6 @@ function encontrarVideoMP4() {
                 reject({ success: false, error: 'Nenhum vídeo encontrado' });
             }
         }
-        
-        // Inicia a primeira tentativa
         tentarEncontrarVideo();
     });
 }
@@ -203,18 +219,11 @@ async function processarConteudoPagina(url, titulo) {
     
     let tab = null;
     try {
-        // Guarda a aba de origem
         const [tabOrigem] = await chrome.tabs.query({ active: true, currentWindow: true });
         console.log('Aba de origem:', tabOrigem.id);
-        
-        // Constrói a URL correta do Canvas
         const urlCanvas = url.startsWith('http') ? url : `https://pucminas.instructure.com${url}`;
         console.log('URL do Canvas:', urlCanvas);
-        
-        // Abre a URL em uma nova aba sem dar foco
         tab = await chrome.tabs.create({ url: urlCanvas, active: false });
-        
-        // Aguarda a página carregar
         await new Promise(resolve => {
             chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
                 if (tabId === tab.id && info.status === 'complete') {
@@ -223,24 +232,16 @@ async function processarConteudoPagina(url, titulo) {
                 }
             });
         });
-        
-        // Executa o script para encontrar o iframe
         const [iframeUrl] = await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             function: encontrarUrlIframe
         });
-        
         if (!iframeUrl.result) {
             console.log('Nenhum iframe encontrado');
             return { success: false, error: 'Nenhum iframe encontrado' };
         }
-        
         console.log('URL do iframe encontrada:', iframeUrl.result);
-        
-        // Atualiza a URL da aba para o iframe
         await chrome.tabs.update(tab.id, { url: iframeUrl.result });
-        
-        // Aguarda a página do iframe carregar
         await new Promise(resolve => {
             chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
                 if (tabId === tab.id && info.status === 'complete') {
@@ -249,39 +250,60 @@ async function processarConteudoPagina(url, titulo) {
                 }
             });
         });
-
-        // Dá foco na aba antes de procurar o vídeo
         await chrome.tabs.update(tab.id, { active: true });
-        
-        // Aguarda um momento para garantir que a página recebeu o foco
         await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        // Executa o script para encontrar o vídeo
         const [videoResult] = await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             function: encontrarVideoMP4
         });
-        
         if (!videoResult.result || !videoResult.result.success) {
             console.log('Nenhum vídeo encontrado');
             return { success: false, error: 'Nenhum vídeo encontrado' };
         }
-        
         console.log('Vídeo encontrado:', videoResult.result.urlVideo);
-        
-        // Inicia o download do vídeo usando a função downloadVideo que limpa o filename
-        await downloadVideo(videoResult.result.urlVideo, `${titulo}.mp4`);
-        
-        return { success: true, urlVideo: videoResult.result.urlVideo };
+
+        // Preferência: disparo do download dentro da página via Blob para fixar nome e preservar cookies/referer
+        const sanitizedName = limparNomeArquivo(`${titulo}.mp4`);
+        const [pageDl] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            args: [videoResult.result.urlVideo, sanitizedName],
+            function: async (url, filename) => {
+                console.log('[PAGE] Iniciando download via Blob:', { url, filename });
+                try {
+                    const resp = await fetch(url, { credentials: 'include' });
+                    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                    const blob = await resp.blob();
+                    const blobUrl = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = blobUrl;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+                    console.log('[PAGE] Download disparado com sucesso (via Blob).');
+                    return { ok: true, via: 'blob' };
+                } catch (err) {
+                    console.error('[PAGE] Falha no download via Blob:', err);
+                    return { ok: false, error: err?.message || String(err) };
+                }
+            }
+        });
+        console.log('Resultado do disparo na página:', pageDl?.result);
+        if (pageDl?.result?.ok) {
+            return { success: true, urlVideo: videoResult.result.urlVideo, via: 'blob' };
+        }
+
+        // Fallback: usa API de downloads (pode sofrer com Content-Disposition, mas tentamos forçar com onDeterminingFilename)
+        const downloadId = await downloadVideo(videoResult.result.urlVideo, sanitizedName);
+        return { success: true, urlVideo: videoResult.result.urlVideo, via: 'downloads', downloadId };
     } catch (error) {
         console.error('Erro ao processar conteúdo:', error);
         return { success: false, error: error.message };
     } finally {
-        // Fecha a aba em qualquer caso (sucesso ou erro)
         if (tab) {
             try {
                 await chrome.tabs.remove(tab.id);
-                // Volta para a aba de origem
                 const [tabOrigem] = await chrome.tabs.query({ active: true, currentWindow: true });
                 if (tabOrigem) {
                     await chrome.tabs.update(tabOrigem.id, { active: true });
@@ -296,18 +318,11 @@ async function processarConteudoPagina(url, titulo) {
 // Função para marcar como feito
 async function marcarComoFeito(url) {
     try {
-        // Guarda a aba de origem
         const [tabOrigem] = await chrome.tabs.query({ active: true, currentWindow: true });
         console.log('Aba de origem:', tabOrigem.id);
-        
-        // Constrói a URL correta do Canvas
         const urlCanvas = url.startsWith('http') ? url : `https://pucminas.instructure.com${url}`;
         console.log('URL do Canvas:', urlCanvas);
-        
-        // Abre a URL em uma nova aba sem dar foco
         const tab = await chrome.tabs.create({ url: urlCanvas, active: false });
-        
-        // Aguarda a página carregar
         await new Promise(resolve => {
             chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
                 if (tabId === tab.id && info.status === 'complete') {
@@ -316,13 +331,10 @@ async function marcarComoFeito(url) {
                 }
             });
         });
-
-        // Executa o script para clicar no botão de marcar como feito
         const [result] = await chrome.scripting.executeScript({
             target: { tabId: tab.id },
             func: () => {
                 return new Promise((resolve) => {
-                    // Função para verificar se o botão está presente
                     const verificarBotao = () => {
                         const botao = document.getElementById('mark-as-done-checkbox');
                         if (botao) {
@@ -332,22 +344,13 @@ async function marcarComoFeito(url) {
                             setTimeout(verificarBotao, 500);
                         }
                     };
-                    
-                    // Inicia a verificação
                     verificarBotao();
                 });
             }
         });
-
-        // Aguarda um momento para garantir que a ação foi concluída
         await new Promise(resolve => setTimeout(resolve, 1000));
-
-        // Fecha a aba
         await chrome.tabs.remove(tab.id);
-
-        // Volta para a aba de origem
         await chrome.tabs.update(tabOrigem.id, { active: true });
-
         return { success: true };
     } catch (error) {
         console.error('Erro ao marcar como feito:', error);
@@ -359,7 +362,7 @@ async function marcarComoFeito(url) {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === 'downloadVideo') {
         downloadVideo(request.url, request.filename)
-            .then(() => sendResponse({ success: true }))
+            .then((downloadId) => sendResponse({ success: true, downloadId }))
             .catch(error => sendResponse({ success: false, error: error.message }));
         return true;
     } else if (request.action === 'processarConteudo') {
@@ -373,7 +376,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             .catch(error => sendResponse({ success: false, error: error.message }));
         return true;
     } else if (request.action === 'openConverter') {
-        // Abre a página de conversão de áudio em uma nova aba
         const url = chrome.runtime.getURL('sandbox.html');
         chrome.tabs.create({ url, active: true })
             .then((tab) => {
