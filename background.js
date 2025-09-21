@@ -317,43 +317,131 @@ async function processarConteudoPagina(url, titulo) {
 
 // Função para marcar como feito
 async function marcarComoFeito(url) {
-    try {
-        const [tabOrigem] = await chrome.tabs.query({ active: true, currentWindow: true });
-        console.log('Aba de origem:', tabOrigem.id);
-        const urlCanvas = url.startsWith('http') ? url : `https://pucminas.instructure.com${url}`;
-        console.log('URL do Canvas:', urlCanvas);
-        const tab = await chrome.tabs.create({ url: urlCanvas, active: false });
-        await new Promise(resolve => {
-            chrome.tabs.onUpdated.addListener(function listener(tabId, info) {
-                if (tabId === tab.id && info.status === 'complete') {
-                    chrome.tabs.onUpdated.removeListener(listener);
-                    resolve();
+    let tab = null;
+    let tabOrigem = null;
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    const tryWithRetries = async (fn, retries = 4, delay = 400) => {
+        for (let i = 0; i < retries; i++) {
+            try {
+                return await fn();
+            } catch (e) {
+                const msg = String(e?.message || e);
+                if (/Tabs cannot be edited right now/i.test(msg) || /Frame with ID .* was removed/i.test(msg) || /No tab with id/i.test(msg)) {
+                    if (i < retries - 1) {
+                        await sleep(delay);
+                        continue;
+                    }
                 }
-            });
-        });
-        const [result] = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            func: () => {
-                return new Promise((resolve) => {
-                    const verificarBotao = () => {
-                        const botao = document.getElementById('mark-as-done-checkbox');
-                        if (botao) {
-                            botao.click();
-                            resolve({ success: true });
-                        } else {
-                            setTimeout(verificarBotao, 500);
+                throw e;
+            }
+        }
+    };
+
+    try {
+        const [orig] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabOrigem = orig;
+        const urlCanvas = url.startsWith('http') ? url : `https://pucminas.instructure.com${url}`;
+        tab = await chrome.tabs.create({ url: urlCanvas, active: false });
+
+        // Aguarda carregamento (máx 20s)
+        await Promise.race([
+            new Promise(resolve => {
+                function listener(tabId, info) {
+                    if (tabId === tab.id && info.status === 'complete') {
+                        chrome.tabs.onUpdated.removeListener(listener);
+                        resolve();
+                    }
+                }
+                chrome.tabs.onUpdated.addListener(listener);
+            }),
+            sleep(20000)
+        ]);
+
+        // Tenta achar/clicar no botão por até ~8s (12 tentativas x 700ms)
+        const [inj] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id, allFrames: true },
+            function: () => {
+                const tryFindButton = () => {
+                    const byId = document.getElementById('mark-as-done-checkbox');
+                    if (byId) return byId;
+                    // Heurísticas adicionais
+                    const candidates = Array.from(document.querySelectorAll('button,input,label'));
+                    for (const el of candidates) {
+                        const txt = (el.innerText || '').toLowerCase();
+                        const ttl = (el.title || '').toLowerCase();
+                        const aria = (el.getAttribute && el.getAttribute('aria-label')) ? el.getAttribute('aria-label').toLowerCase() : '';
+                        if (/marcar como feito|mark as done|conclu[ií]do/.test(txt) || /marcar como feito|mark as done|conclu[ií]do/.test(ttl) || /marcar como feito|mark as done|conclu[ií]do/.test(aria)) {
+                            return el;
                         }
+                    }
+                    return null;
+                };
+
+                return new Promise((resolve) => {
+                    let tentativas = 0;
+                    const maxTentativas = 12;
+                    const tentar = () => {
+                        const btn = tryFindButton();
+                        if (btn) {
+                            try {
+                                btn.scrollIntoView?.({ block: 'center', inline: 'center' });
+                                if (typeof btn.click === 'function') {
+                                    btn.click();
+                                } else {
+                                    btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                }
+                                 resolve({ success: true });
+                             } catch (e) {
+                                 resolve({ success: false, error: e?.message || String(e) });
+                             }
+                             return;
+                         }
+                        tentativas++;
+                        if (tentativas >= maxTentativas) {
+                            resolve({ success: false, reason: 'not_found' });
+                            return;
+                        }
+                        setTimeout(tentar, 700);
                     };
-                    verificarBotao();
+                    tentar();
                 });
             }
         });
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        await chrome.tabs.remove(tab.id);
-        await chrome.tabs.update(tabOrigem.id, { active: true });
-        return { success: true };
+
+        // Aguarda pequeno intervalo para a ação refletir (se ocorreu)
+        await sleep(800);
+
+        // Fecha a aba criada e volta o foco
+        if (tab?.id) {
+            await tryWithRetries(() => chrome.tabs.remove(tab.id));
+        }
+        if (tabOrigem?.id) {
+            await tryWithRetries(() => chrome.tabs.update(tabOrigem.id, { active: true }));
+        }
+
+        const r = inj?.result || {};
+        if (r.success) {
+            return { success: true };
+        }
+        if (r.reason === 'not_found') {
+            // Não encontrou o botão: deixar como está e seguir sem erro
+            return { success: true, skipped: true, reason: 'not_found' };
+        }
+        // Outro erro dentro da página
+        return { success: false, error: r.error || 'unknown_error' };
     } catch (error) {
         console.error('Erro ao marcar como feito:', error);
+        // Garante que tentamos fechar a aba mesmo em erro
+        try {
+            if (tab?.id) {
+                await tryWithRetries(() => chrome.tabs.remove(tab.id));
+            }
+            if (tabOrigem?.id) {
+                await tryWithRetries(() => chrome.tabs.update(tabOrigem.id, { active: true }));
+            }
+        } catch (e) {
+            // Ignora erros ao tentar fechar/ativar
+        }
         return { success: false, error: error.message };
     }
 }
